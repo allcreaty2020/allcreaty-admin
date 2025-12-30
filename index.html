@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Allcreaty 库存后台</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin: 20px; }
+    .box { border: 1px solid #ddd; padding: 16px; border-radius: 10px; margin-bottom: 16px; }
+    input, button { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; }
+    .small { font-size: 12px; color: #666; }
+    .hidden { display: none; }
+    .ok { color: green; }
+    .err { color: red; }
+  </style>
+</head>
+<body>
+
+  <h1>Allcreaty 库存后台（MVP）</h1>
+  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看（后续可接 Shopify/eBay/Amazon）</p>
+
+  <!-- 登录框 -->
+  <div class="box" id="loginBox">
+    <h2>登录</h2>
+    <input id="email" placeholder="Email" />
+    <input id="password" type="password" placeholder="Password" />
+    <button onclick="login()">登录</button>
+    <div id="loginMsg"></div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app" class="hidden">
+    <div class="box">
+      <div class="row">
+        <div>
+          <h2>当前用户</h2>
+          <div id="userInfo"></div>
+        </div>
+        <div style="display:flex;align-items:end;">
+          <button onclick="logout()">退出登录</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新增SKU -->
+    <div class="box">
+      <h2>新增 SKU</h2>
+      <input id="sku_code" placeholder="SKU Code（必须唯一）" />
+      <input id="title" placeholder="Title（商品名称）" />
+      <input id="barcode" placeholder="Barcode（可选）" />
+      <input id="cost" placeholder="Cost（可选）" />
+      <button onclick="createSku()">新增 SKU</button>
+      <div id="skuMsg"></div>
+    </div>
+
+    <!-- 入库 -->
+    <div class="box">
+      <h2>入库（增加库存）</h2>
+      <input id="receiptSku" placeholder="SKU Code（输入已有SKU）" />
+      <input id="receiptQty" type="number" placeholder="数量（如 10）" />
+      <input id="receiptNote" placeholder="备注（可选，例如：PO123 到货）" />
+      <button onclick="receipt()">确认入库</button>
+      <div id="receiptMsg"></div>
+    </div>
+
+    <!-- 库存表 -->
+    <div class="box">
+      <h2>库存列表</h2>
+      <button onclick="loadInventory()">刷新库存</button>
+      <div class="small">Available = OnHand - Reserved（后续接订单自动Reserved）</div>
+      <table>
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Title</th>
+            <th>OnHand</th>
+            <th>Reserved</th>
+            <th>Available</th>
+          </tr>
+        </thead>
+        <tbody id="invTbody"></tbody>
+      </table>
+      <div id="invMsg"></div>
+    </div>
+  </div>
+
+  <!-- Supabase JS SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script>
+    /**********************
+     * 1) 修改成你的 Supabase 信息
+     **********************/
+    const SUPABASE_URL = "YOUR_SUPABASE_URL";
+    const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // 页面初始化
+    init();
+
+    async function init() {
+      const { data: { session } } = await sb.auth.getSession();
+      if (session) showApp(session.user);
+    }
+
+    function showMsg(el, msg, ok=true){
+      el.innerHTML = `<div class="${ok ? 'ok' : 'err'}">${msg}</div>`;
+      setTimeout(()=> el.innerHTML = "", 5000);
+    }
+
+    function showApp(user){
+      document.getElementById("loginBox").classList.add("hidden");
+      document.getElementById("app").classList.remove("hidden");
+      document.getElementById("userInfo").innerHTML = `
+        <div><b>${user.email}</b></div>
+        <div class="small">User ID: ${user.id}</div>
+      `;
+      loadInventory();
+    }
+
+    async function login(){
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value.trim();
+      const msgEl = document.getElementById("loginMsg");
+
+      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) return showMsg(msgEl, error.message, false);
+      showMsg(msgEl, "登录成功 ✅");
+      showApp(data.user);
+    }
+
+    async function logout(){
+      await sb.auth.signOut();
+      location.reload();
+    }
+
+    async function createSku(){
+      const sku_code = document.getElementById("sku_code").value.trim();
+      const title = document.getElementById("title").value.trim();
+      const barcode = document.getElementById("barcode").value.trim() || null;
+      const cost = document.getElementById("cost").value.trim();
+      const skuMsg = document.getElementById("skuMsg");
+
+      if(!sku_code || !title) return showMsg(skuMsg, "SKU Code 和 Title 必填", false);
+
+      const { data, error } = await sb.from("skus").insert([{
+        sku_code, title, barcode, cost: cost ? Number(cost) : null
+      }]).select();
+
+      if(error) return showMsg(skuMsg, error.message, false);
+
+      // 创建 inventory 记录
+      const skuId = data[0].id;
+      await sb.from("inventory").insert([{ sku_id: skuId, on_hand: 0, reserved: 0 }]);
+
+      showMsg(skuMsg, "新增 SKU 成功 ✅");
+      loadInventory();
+    }
+
+    async function receipt(){
+      const code = document.getElementById("receiptSku").value.trim();
+      const qty = Number(document.getElementById("receiptQty").value);
+      const note = document.getElementById("receiptNote").value.trim() || null;
+      const receiptMsg = document.getElementById("receiptMsg");
+
+      if(!code || !qty || qty <= 0) return showMsg(receiptMsg, "SKU 与数量必须正确", false);
+
+      // 找到 SKU
+      const { data: sku, error: e1 } = await sb.from("skus").select("*").eq("sku_code", code).single();
+      if(e1) return showMsg(receiptMsg, "找不到SKU：请先新增SKU", false);
+
+      // 更新库存
+      const { data: inv, error: e2 } = await sb.from("inventory").select("*").eq("sku_id", sku.id).single();
+      if(e2) return showMsg(receiptMsg, "库存记录不存在", false);
+
+      const newOnHand = inv.on_hand + qty;
+
+      const { error: e3 } = await sb.from("inventory").update({
+        on_hand: newOnHand, updated_at: new Date().toISOString()
+      }).eq("sku_id", sku.id);
+
+      if(e3) return showMsg(receiptMsg, e3.message, false);
+
+      // 写库存流水
+      await sb.from("inventory_transactions").insert([{
+        sku_id: sku.id,
+        type: "RECEIPT",
+        qty: qty,
+        ref_type: "RECEIPT",
+        note
+      }]);
+
+      showMsg(receiptMsg, `入库成功 ✅ OnHand: ${inv.on_hand} → ${newOnHand}`);
+      loadInventory();
+    }
+
+    async function loadInventory(){
+      const invTbody = document.getElementById("invTbody");
+      const invMsg = document.getElementById("invMsg");
+      invTbody.innerHTML = "";
+
+      const { data, error } = await sb
+        .from("inventory")
+        .select("on_hand,reserved,skus(id,sku_code,title)")
+        .order("updated_at", { ascending: false });
+
+      if(error) return showMsg(invMsg, error.message, false);
+
+      data.forEach(r=>{
+        const sku = r.skus;
+        const available = (r.on_hand || 0) - (r.reserved || 0);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${sku.sku_code}</td>
+          <td>${sku.title}</td>
+          <td>${r.on_hand}</td>
+          <td>${r.reserved}</td>
+          <td><b>${available}</b></td>
+        `;
+        invTbody.appendChild(tr);
+      });
+    }
+  </script>
+</body>
+</html>
