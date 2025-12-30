@@ -2,7 +2,6 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    # 每天执行一次（UTC 16:00）
     - cron: "0 16 * * *"
   workflow_dispatch:
 
@@ -10,15 +9,15 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase
+      - name: Ping Supabase Auth Health
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           set -e
-          echo "Pinging Supabase..."
+          echo "Pinging Supabase Auth Health..."
           curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
-            "${SUPABASE_URL}/rest/v1/skus?select=id&limit=1" \
+            "${SUPABASE_URL}/auth/v1/health" \
             -H "apikey: ${SUPABASE_ANON_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_ANON_KEY}"
           echo "Done ✅"
