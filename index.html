@@ -310,3 +310,128 @@
   </script>
 </body>
 </html>
+    <!-- Amazon 模块 -->
+    <div class="box">
+      <h2>Amazon Listings（缓存）</h2>
+      <div class="small">这里显示 amazon_listings_cache 的数据（后续会接 SP-API 自动拉取）</div>
+      <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Seller SKU</th>
+            <th>ASIN</th>
+            <th>Title</th>
+            <th>Qty</th>
+            <th>Status</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody id="amazonListingTbody"></tbody>
+      </table>
+      <div id="amazonListingMsg"></div>
+    </div>
+
+    <div class="box">
+      <h2>Amazon SKU 映射</h2>
+      <div class="small">amazon_sku_map：把 Amazon Seller SKU 映射到你的仓库 SKU（sku_code）</div>
+
+      <div class="row">
+        <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 AMZ-123）" />
+        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 Allcreaty Elite）" />
+      </div>
+      <button onclick="addAmazonSkuMap()">新增映射</button>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Amazon Seller SKU</th>
+            <th>SKU Code</th>
+            <th>创建时间</th>
+          </tr>
+        </thead>
+        <tbody id="amazonMapTbody"></tbody>
+      </table>
+      <div id="amazonMapMsg"></div>
+    </div>
+    async function loadAmazonListings(){
+      const tbody = document.getElementById("amazonListingTbody");
+      const msgEl = document.getElementById("amazonListingMsg");
+      tbody.innerHTML = "";
+
+      const { data, error } = await sb
+        .from("amazon_listings_cache")
+        .select("amazon_seller_sku,asin,title,quantity,status,updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(50);
+
+      if(error) return showMsg(msgEl, error.message, false);
+
+      if(!data || data.length === 0){
+        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（你还没从 Amazon 拉取 listing，后面我们会接 SP-API）</td></tr>`;
+        return;
+      }
+
+      data.forEach(r=>{
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.amazon_seller_sku}</td>
+          <td>${r.asin || ""}</td>
+          <td>${r.title || ""}</td>
+          <td>${r.quantity ?? ""}</td>
+          <td>${r.status || ""}</td>
+          <td>${r.updated_at ? new Date(r.updated_at).toLocaleString() : ""}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadAmazonSkuMap(){
+      const tbody = document.getElementById("amazonMapTbody");
+      const msgEl = document.getElementById("amazonMapMsg");
+      tbody.innerHTML = "";
+
+      const { data, error } = await sb
+        .from("amazon_sku_map")
+        .select("amazon_seller_sku,sku_code,created_at")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if(error) return showMsg(msgEl, error.message, false);
+
+      if(!data || data.length === 0){
+        tbody.innerHTML = `<tr><td colspan="3" class="small">暂无映射。你可以先添加一条测试映射。</td></tr>`;
+        return;
+      }
+
+      data.forEach(r=>{
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.amazon_seller_sku}</td>
+          <td>${r.sku_code}</td>
+          <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ""}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function addAmazonSkuMap(){
+      const sellerSku = document.getElementById("amazonSellerSku").value.trim();
+      const skuCode = document.getElementById("amazonSkuCode").value.trim();
+      const msgEl = document.getElementById("amazonMapMsg");
+
+      if(!sellerSku || !skuCode){
+        return showMsg(msgEl, "Amazon Seller SKU 和 SKU Code 必填", false);
+      }
+
+      const { error } = await sb
+        .from("amazon_sku_map")
+        .insert([{ amazon_seller_sku: sellerSku, sku_code: skuCode }]);
+
+      if(error) return showMsg(msgEl, error.message, false);
+
+      showMsg(msgEl, "新增映射成功 ✅");
+      document.getElementById("amazonSellerSku").value = "";
+      document.getElementById("amazonSkuCode").value = "";
+      loadAmazonSkuMap();
+    }
