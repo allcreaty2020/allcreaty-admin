@@ -14,7 +14,8 @@
     button:hover { opacity: 0.9; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; }
+    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #fafafa; }
     .hidden { display: none; }
     .ok { color: #0a7d2c; font-weight: bold; margin-top: 8px; }
     .err { color: #b30000; font-weight: bold; margin-top: 8px; }
@@ -27,14 +28,14 @@
 <body>
 
   <h1>Allcreaty 库存后台（MVP）</h1>
-  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看（后续可接 Shopify/eBay/Amazon）</p>
+  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings缓存 / Amazon SKU映射</p>
 
   <div class="box warn">
     <b>✅ 第一次使用必看：</b>
     <div class="small">
-      1) 请在 Supabase 里把 RLS 暂时关闭（skus / inventory / inventory_transactions），否则你登录后会读写失败。<br/>
-      2) 这里使用的是 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
-      3) 如果你担心 key 泄露，可在 Supabase → Settings → API 里 Rotate keys。
+      1) MVP 阶段建议在 Supabase 暂时关闭 RLS（skus / inventory / inventory_transactions / amazon表），否则会读写失败。<br/>
+      2) 本页面使用 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
+      3) 如果你担心 key 泄露，可在 Supabase → Settings → API 里 Rotate keys，然后更新这里。
     </div>
   </div>
 
@@ -107,9 +108,9 @@
       <div id="invMsg"></div>
     </div>
 
-    <!-- 流水（可选查看） -->
+    <!-- 流水 -->
     <div class="box">
-      <h2>最近库存流水（可选）</h2>
+      <h2>最近库存流水</h2>
       <button class="btnSecondary" onclick="loadTx()">刷新流水</button>
       <table>
         <thead>
@@ -125,6 +126,53 @@
       </table>
       <div id="txMsg"></div>
     </div>
+
+    <!-- Amazon Listings -->
+    <div class="box">
+      <h2>Amazon Listings（缓存）</h2>
+      <div class="small">显示 amazon_listings_cache 表的数据（后续接 SP-API 自动拉取）</div>
+      <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Seller SKU</th>
+            <th>ASIN</th>
+            <th>Title</th>
+            <th>Qty</th>
+            <th>Status</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody id="amazonListingTbody"></tbody>
+      </table>
+      <div id="amazonListingMsg"></div>
+    </div>
+
+    <!-- Amazon SKU Mapping -->
+    <div class="box">
+      <h2>Amazon SKU 映射</h2>
+      <div class="small">amazon_sku_map：把 Amazon Seller SKU 映射到你的仓库 SKU（sku_code）</div>
+
+      <div class="row">
+        <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 AMZ-123）" />
+        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 Allcreaty Elite）" />
+      </div>
+      <button onclick="addAmazonSkuMap()">新增映射</button>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Amazon Seller SKU</th>
+            <th>SKU Code</th>
+            <th>创建时间</th>
+          </tr>
+        </thead>
+        <tbody id="amazonMapTbody"></tbody>
+      </table>
+      <div id="amazonMapMsg"></div>
+    </div>
+
   </div>
 
   <!-- Supabase JS SDK -->
@@ -132,7 +180,7 @@
 
   <script>
     /**********************
-     * ✅ 已帮你填好 Supabase 信息
+     * ✅ Supabase 信息（已填好）
      **********************/
     const SUPABASE_URL = "https://zbfrdzaklmifuukokoii.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpiZnJkemFrbG1pZnV1a29rb2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNjcxMDgsImV4cCI6MjA4MjY0MzEwOH0.XkZiFiKpmQ8FhwUR8SsIQFY4DlBCq4pRiUXaTikCSPk";
@@ -161,6 +209,8 @@
       `;
       loadInventory();
       loadTx();
+      loadAmazonListings();
+      loadAmazonSkuMap();
     }
 
     async function login(){
@@ -181,7 +231,7 @@
 
       if(!email || !password) return showMsg(msgEl, "请输入 Email 和 Password", false);
 
-      const { data, error } = await sb.auth.signUp({ email, password });
+      const { error } = await sb.auth.signUp({ email, password });
       if (error) return showMsg(msgEl, error.message, false);
 
       showMsg(msgEl, "注册成功 ✅（请到邮箱确认或在 Supabase Users 查看）");
@@ -295,6 +345,11 @@
 
       if(error) return showMsg(txMsg, error.message, false);
 
+      if(!data || data.length === 0){
+        txTbody.innerHTML = `<tr><td colspan="5" class="small">暂无流水</td></tr>`;
+        return;
+      }
+
       data.forEach(r=>{
         const tr = document.createElement("tr");
         tr.innerHTML = `
@@ -307,53 +362,9 @@
         txTbody.appendChild(tr);
       });
     }
-  </script>
-</body>
-</html>
-    <!-- Amazon 模块 -->
-    <div class="box">
-      <h2>Amazon Listings（缓存）</h2>
-      <div class="small">这里显示 amazon_listings_cache 的数据（后续会接 SP-API 自动拉取）</div>
-      <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Seller SKU</th>
-            <th>ASIN</th>
-            <th>Title</th>
-            <th>Qty</th>
-            <th>Status</th>
-            <th>更新时间</th>
-          </tr>
-        </thead>
-        <tbody id="amazonListingTbody"></tbody>
-      </table>
-      <div id="amazonListingMsg"></div>
-    </div>
+    // ===== Amazon Module =====
 
-    <div class="box">
-      <h2>Amazon SKU 映射</h2>
-      <div class="small">amazon_sku_map：把 Amazon Seller SKU 映射到你的仓库 SKU（sku_code）</div>
-
-      <div class="row">
-        <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 AMZ-123）" />
-        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 Allcreaty Elite）" />
-      </div>
-      <button onclick="addAmazonSkuMap()">新增映射</button>
-
-      <table>
-        <thead>
-          <tr>
-            <th>Amazon Seller SKU</th>
-            <th>SKU Code</th>
-            <th>创建时间</th>
-          </tr>
-        </thead>
-        <tbody id="amazonMapTbody"></tbody>
-      </table>
-      <div id="amazonMapMsg"></div>
-    </div>
     async function loadAmazonListings(){
       const tbody = document.getElementById("amazonListingTbody");
       const msgEl = document.getElementById("amazonListingMsg");
@@ -435,3 +446,6 @@
       document.getElementById("amazonSkuCode").value = "";
       loadAmazonSkuMap();
     }
+  </script>
+</body>
+</html>
