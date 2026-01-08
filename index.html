@@ -9,7 +9,7 @@
     h1 { margin-bottom: 4px; }
     .small { font-size: 12px; color: #666; margin-top:0; }
     .box { background:#fff; border: 1px solid #e5e5e5; padding: 16px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }
-    input, button { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid #ddd; }
+    input, button, select { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid #ddd; }
     button { cursor: pointer; border: none; background: #111; color: #fff; font-weight: bold; }
     button:hover { opacity: 0.9; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -23,6 +23,9 @@
     .btnSecondary { background:#fff; color:#111; border:1px solid #111; }
     .btnSecondary:hover { background:#f4f4f4; }
     .tag { display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #ddd; margin-left:8px; }
+    .statusBar { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; }
+    .statusItem { padding:6px 10px; border-radius:999px; border:1px solid #ddd; background:#fafafa; }
+    .logBox { font-family: monospace; white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:12px; font-size:12px; height:130px; overflow:auto; }
   </style>
 </head>
 <body>
@@ -30,12 +33,22 @@
   <h1>Allcreaty 库存后台（MVP）</h1>
   <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings缓存 / Amazon SKU映射</p>
 
+  <!-- 状态栏 -->
+  <div class="box">
+    <h2>系统状态 <span class="tag">Status</span></h2>
+    <div class="statusBar">
+      <div class="statusItem" id="statusAuth">Auth: 未登录</div>
+      <div class="statusItem" id="statusDB">DB: 未检测</div>
+      <div class="statusItem" id="statusAmazon">Amazon API: 未接入</div>
+    </div>
+  </div>
+
   <div class="box warn">
     <b>✅ 第一次使用必看：</b>
     <div class="small">
       1) MVP 阶段建议在 Supabase 暂时关闭 RLS（skus / inventory / inventory_transactions / amazon表），否则会读写失败。<br/>
       2) 本页面使用 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
-      3) 如果你担心 key 泄露，可在 Supabase → Settings → API 里 Rotate keys，然后更新这里。
+      3) SP-API 的 refresh_token / client_secret 不能放前端，必须放 Worker/Server。<br/>
     </div>
   </div>
 
@@ -51,6 +64,7 @@
 
   <!-- 主界面 -->
   <div id="app" class="hidden">
+
     <div class="box">
       <div class="row">
         <div>
@@ -92,7 +106,7 @@
     <div class="box">
       <h2>库存列表</h2>
       <button class="btnSecondary" onclick="loadInventory()">刷新库存</button>
-      <div class="small">Available = OnHand - Reserved（后续接订单自动 Reserved）</div>
+      <div class="small">Available = OnHand - Reserved</div>
       <table>
         <thead>
           <tr>
@@ -130,7 +144,7 @@
     <!-- Amazon Listings -->
     <div class="box">
       <h2>Amazon Listings（缓存）</h2>
-      <div class="small">显示 amazon_listings_cache 表的数据（后续接 SP-API 自动拉取）</div>
+      <div class="small">显示 amazon_listings_cache 表数据（未来通过 Worker 自动拉取）</div>
       <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
 
       <table>
@@ -152,11 +166,11 @@
     <!-- Amazon SKU Mapping -->
     <div class="box">
       <h2>Amazon SKU 映射</h2>
-      <div class="small">amazon_sku_map：把 Amazon Seller SKU 映射到你的仓库 SKU（sku_code）</div>
+      <div class="small">amazon_sku_map：Amazon Seller SKU → 仓库 sku_code</div>
 
       <div class="row">
         <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 AMZ-123）" />
-        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 Allcreaty Elite）" />
+        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 AC-001）" />
       </div>
       <button onclick="addAmazonSkuMap()">新增映射</button>
 
@@ -173,34 +187,65 @@
       <div id="amazonMapMsg"></div>
     </div>
 
+    <!-- 日志 -->
+    <div class="box">
+      <h2>系统日志 <span class="tag">Debug</span></h2>
+      <div class="logBox" id="logBox">[Init] Ready\n</div>
+    </div>
+
   </div>
 
-  <!-- Supabase JS SDK -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <script>
     /**********************
-     * ✅ Supabase 信息（已填好）
+     * ✅ 配置区
      **********************/
-    const SUPABASE_URL = "https://zbfrdzaklmifuukokoii.supabase.co";
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpiZnJkemFrbG1pZnV1a29rb2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNjcxMDgsImV4cCI6MjA4MjY0MzEwOH0.XkZiFiKpmQ8FhwUR8SsIQFY4DlBCq4pRiUXaTikCSPk";
+    const CONFIG = {
+      SUPABASE_URL: "https://zbfrdzaklmifuukokoii.supabase.co",
+      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpiZnJkemFrbG1pZnV1a29rb2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNjcxMDgsImV4cCI6MjA4MjY0MzEwOH0.XkZiFiKpmQ8FhwUR8SsIQFY4DlBCq4pRiUXaTikCSPk"
+    };
 
-    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
 
-    // 页面初始化
+    function log(msg){
+      const box = document.getElementById("logBox");
+      box.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function setStatus(id, text){
+      document.getElementById(id).textContent = text;
+    }
+
     init();
 
     async function init() {
+      log("Init...");
       const { data: { session } } = await sb.auth.getSession();
       if (session) showApp(session.user);
+      await testDB();
+    }
+
+    async function testDB(){
+      const { error } = await sb.from("skus").select("id").limit(1);
+      if(error){
+        setStatus("statusDB", "DB: ❌ 连接失败");
+        log("DB ERROR: " + error.message);
+      }else{
+        setStatus("statusDB", "DB: ✅ 正常");
+        log("DB OK");
+      }
     }
 
     function showMsg(el, msg, ok=true){
       el.innerHTML = `<div class="${ok ? 'ok' : 'err'}">${msg}</div>`;
       setTimeout(()=> el.innerHTML = "", 6000);
+      log((ok ? "OK: " : "ERR: ") + msg);
     }
 
     function showApp(user){
+      setStatus("statusAuth", "Auth: ✅ 已登录");
       document.getElementById("loginBox").classList.add("hidden");
       document.getElementById("app").classList.remove("hidden");
       document.getElementById("userInfo").innerHTML = `
@@ -257,7 +302,6 @@
 
       if(error) return showMsg(skuMsg, error.message, false);
 
-      // 创建 inventory 记录
       const skuId = data[0].id;
       const { error: e2 } = await sb.from("inventory").insert([{ sku_id: skuId, on_hand: 0, reserved: 0 }]);
       if (e2) return showMsg(skuMsg, "SKU 已创建，但库存记录创建失败：" + e2.message, false);
@@ -274,23 +318,19 @@
 
       if(!code || !qty || qty <= 0) return showMsg(receiptMsg, "SKU 与数量必须正确", false);
 
-      // 找到 SKU
       const { data: sku, error: e1 } = await sb.from("skus").select("*").eq("sku_code", code).single();
       if(e1) return showMsg(receiptMsg, "找不到SKU：请先新增SKU", false);
 
-      // 获取库存
       const { data: inv, error: e2 } = await sb.from("inventory").select("*").eq("sku_id", sku.id).single();
       if(e2) return showMsg(receiptMsg, "库存记录不存在", false);
 
       const newOnHand = (inv.on_hand || 0) + qty;
 
-      // 更新库存
       const { error: e3 } = await sb.from("inventory").update({
         on_hand: newOnHand, updated_at: new Date().toISOString()
       }).eq("sku_id", sku.id);
       if(e3) return showMsg(receiptMsg, e3.message, false);
 
-      // 写流水
       const { error: e4 } = await sb.from("inventory_transactions").insert([{
         sku_id: sku.id,
         type: "RECEIPT",
@@ -363,8 +403,6 @@
       });
     }
 
-    // ===== Amazon Module =====
-
     async function loadAmazonListings(){
       const tbody = document.getElementById("amazonListingTbody");
       const msgEl = document.getElementById("amazonListingMsg");
@@ -379,7 +417,7 @@
       if(error) return showMsg(msgEl, error.message, false);
 
       if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（你还没从 Amazon 拉取 listing，后面我们会接 SP-API）</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（后面会接 SP-API 拉取）</td></tr>`;
         return;
       }
 
@@ -411,7 +449,7 @@
       if(error) return showMsg(msgEl, error.message, false);
 
       if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="3" class="small">暂无映射。你可以先添加一条测试映射。</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="3" class="small">暂无映射</td></tr>`;
         return;
       }
 
@@ -431,12 +469,9 @@
       const skuCode = document.getElementById("amazonSkuCode").value.trim();
       const msgEl = document.getElementById("amazonMapMsg");
 
-      if(!sellerSku || !skuCode){
-        return showMsg(msgEl, "Amazon Seller SKU 和 SKU Code 必填", false);
-      }
+      if(!sellerSku || !skuCode) return showMsg(msgEl, "Amazon Seller SKU 和 SKU Code 必填", false);
 
-      const { error } = await sb
-        .from("amazon_sku_map")
+      const { error } = await sb.from("amazon_sku_map")
         .insert([{ amazon_seller_sku: sellerSku, sku_code: skuCode }]);
 
       if(error) return showMsg(msgEl, error.message, false);
@@ -446,6 +481,7 @@
       document.getElementById("amazonSkuCode").value = "";
       loadAmazonSkuMap();
     }
+
   </script>
 </body>
 </html>
