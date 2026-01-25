@@ -9,15 +9,23 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase Auth Health
+      - name: Ping Supabase REST (counts as activity)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          set -e
-          echo "Pinging Supabase Auth Health..."
-          curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
-            "${SUPABASE_URL}/auth/v1/health" \
+          set -euo pipefail
+          echo "Pinging Supabase REST..."
+
+          # 选一个你一定存在的表：inventory / skus / amazon_sku_map 等
+          # 这里我用 skus，你可以改成 inventory
+          URL="${SUPABASE_URL}/rest/v1/skus?select=id&limit=1"
+
+          # --fail-with-body: HTTP>=400 直接非0退出，并把 body 打出来
+          curl -sS --fail-with-body \
             -H "apikey: ${SUPABASE_ANON_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}"
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            "$URL" | head -c 500
+
+          echo ""
           echo "Done ✅"
