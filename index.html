@@ -22,7 +22,7 @@
     .warn { background:#fff8e1; border:1px solid #ffe0a3; padding:12px; border-radius:12px; }
     .btnSecondary { background:#fff; color:#111; border:1px solid #111; }
     .btnSecondary:hover { background:#f4f4f4; }
-    .tag { display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #ddd; margin-left:8px; }
+    .tag { display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #ddd; margin-left:8px; background:#fafafa; }
     .statusBar { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; }
     .statusItem { padding:6px 10px; border-radius:999px; border:1px solid #ddd; background:#fafafa; }
     .logBox { font-family: monospace; white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:12px; font-size:12px; height:160px; overflow:auto; }
@@ -34,7 +34,7 @@
 <body>
 
   <h1>Allcreaty 库存后台（MVP）</h1>
-  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings（由 Worker 同步写入）/ Amazon SKU 映射</p>
+  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings（由 Worker 同步写入）/ Amazon SKU 映射 / ✅ Amazon FBM 库存状态（自动推送）</p>
 
   <!-- 状态栏 -->
   <div class="box">
@@ -52,7 +52,8 @@
     <div class="small">
       1) 本页面使用 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
       2) SP-API 的 client_secret / refresh_token / aws key 全部在 Cloudflare Worker Secrets 里。<br/>
-      3) Amazon 数据同步：前端只调用 Worker；Worker 写入 Supabase 的 <span class="mono">amazon_listings</span> 表。<br/>
+      3) Amazon Listings 同步：前端只调用 Worker；Worker 写入 Supabase 的 <span class="mono">amazon_listings</span> 表。<br/>
+      4) ✅ Amazon FBM 库存推送：前端调用 Worker 的 <span class="mono">/inventory/recalc_amazon_fbm</span> & <span class="mono">/amazon/fbm/push_pending</span>。<br/>
     </div>
   </div>
 
@@ -189,6 +190,36 @@
       <div id="amazonListingMsg"></div>
     </div>
 
+    <!-- ✅ NEW: Amazon FBM Inventory State -->
+    <div class="box">
+      <h2>Amazon FBM 库存状态 <span class="tag">Auto Sync</span></h2>
+      <div class="small">
+        数据来源：<span class="mono">channel_inventory_state</span>（channel = AMAZON_FBM）<br/>
+        含义：Target = 系统计算库存；Pushed = 实际已推送到 Amazon 的数量
+      </div>
+
+      <div class="row">
+        <button class="btnSecondary" onclick="recalcAmazonFbm()">重新计算目标库存</button>
+        <button onclick="pushAmazonFbm()">推送库存到 Amazon</button>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>SKU Code</th>
+            <th>Target Qty</th>
+            <th>Last Pushed</th>
+            <th>Status</th>
+            <th>Last Push At</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="amazonFbmStateTbody"></tbody>
+      </table>
+
+      <div id="amazonFbmStateMsg"></div>
+    </div>
+
     <!-- Amazon SKU Mapping -->
     <div class="box">
       <h2>Amazon SKU 映射</h2>
@@ -299,6 +330,7 @@
       loadTx();
       loadAmazonListings();
       loadAmazonSkuMap();
+      loadAmazonFbmState(); // ✅ NEW
     }
 
     async function login(){
@@ -447,7 +479,7 @@
     }
 
     /**********************
-     * ✅ Amazon Listings（新表 amazon_listings）
+     * ✅ Amazon Listings（amazon_listings）
      **********************/
     async function loadAmazonListings(){
       const tbody = document.getElementById("amazonListingTbody");
@@ -480,12 +512,101 @@
       });
     }
 
+    /**********************
+     * ✅ NEW: Amazon FBM Inventory State
+     **********************/
+    async function loadAmazonFbmState(){
+      const tbody = document.getElementById("amazonFbmStateTbody");
+      const msgEl = document.getElementById("amazonFbmStateMsg");
+      tbody.innerHTML = "";
+
+      const { data, error } = await sb
+        .from("channel_inventory_state")
+        .select("sku_code,target_qty,last_pushed_qty,last_push_at,last_status,last_error_message,updated_at")
+        .eq("channel", "AMAZON_FBM")
+        .order("updated_at", { ascending: false });
+
+      if(error) return showMsg(msgEl, error.message, false);
+
+      if(!data || data.length === 0){
+        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无 Amazon FBM 记录（先跑一次 recalc + push）</td></tr>`;
+        return;
+      }
+
+      data.forEach(r=>{
+        const target = Number(r.target_qty ?? 0);
+        const pushed = (r.last_pushed_qty === null || r.last_pushed_qty === undefined) ? null : Number(r.last_pushed_qty);
+        const isSynced = (r.last_status === "success") && (pushed !== null) && (target === pushed);
+
+        let statusHtml = `<span class="tag">PENDING</span>`;
+        if (isSynced) statusHtml = `<span class="pillOk">SYNCED</span>`;
+        else if (r.last_status === "error") statusHtml = `<span class="pillErr">ERROR</span>`;
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="mono">${escapeHtml(r.sku_code || "")}</td>
+          <td><b>${target}</b></td>
+          <td>${pushed === null ? "-" : pushed}</td>
+          <td>${statusHtml}</td>
+          <td>${r.last_push_at ? new Date(r.last_push_at).toLocaleString() : "-"}</td>
+          <td class="small">${escapeHtml(r.last_error_message || "")}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function recalcAmazonFbm(){
+      const msgEl = document.getElementById("amazonFbmStateMsg");
+      showMsg(msgEl, "正在重新计算 Amazon FBM 目标库存…", true);
+
+      try{
+        const r = await fetch(`${CONFIG.WORKER_BASE}/inventory/recalc_amazon_fbm`, { method: "POST" });
+        const j = await r.json();
+
+        if(!r.ok || !j.ok){
+          showMsg(msgEl, "计算失败：" + JSON.stringify(j), false);
+          return;
+        }
+
+        showMsg(msgEl, `目标库存已重新计算 ✅ upserted_rows=${j.upserted_rows}`, true);
+        await loadAmazonFbmState();
+      }catch(e){
+        showMsg(msgEl, "计算异常：" + e.message, false);
+      }
+    }
+
+    async function pushAmazonFbm(){
+      const msgEl = document.getElementById("amazonFbmStateMsg");
+      showMsg(msgEl, "正在推送库存到 Amazon FBM…", true);
+
+      try{
+        const url = `${CONFIG.WORKER_BASE}/amazon/fbm/push_pending?marketplaceId=${encodeURIComponent(CONFIG.MARKETPLACE_ID)}&limit=50`;
+        const r = await fetch(url, { method: "POST" });
+        const j = await r.json();
+
+        if(!r.ok || !j.ok){
+          showMsg(msgEl, "推送失败：" + JSON.stringify(j), false);
+          return;
+        }
+
+        const okCount = (j.results || []).filter(x => x.ok).length;
+        const failCount = (j.results || []).length - okCount;
+
+        showMsg(msgEl, `推送完成 ✅ 成功 ${okCount} / 失败 ${failCount}`, true);
+        await loadAmazonFbmState();
+      }catch(e){
+        showMsg(msgEl, "推送异常：" + e.message, false);
+      }
+    }
+
+    /**********************
+     * ✅ Amazon SKU Map
+     **********************/
     async function loadAmazonSkuMap(){
       const tbody = document.getElementById("amazonMapTbody");
       const msgEl = document.getElementById("amazonMapMsg");
       tbody.innerHTML = "";
 
-      // 这里假设你表里有 enabled 字段（你已经在批量里用到了）
       const { data, error } = await sb
         .from("amazon_sku_map")
         .select("enabled,amazon_seller_sku,sku_code,created_at")
