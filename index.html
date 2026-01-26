@@ -17,8 +17,8 @@
     th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; vertical-align: top; }
     th { background: #fafafa; }
     .hidden { display: none; }
-    .ok { color: #0a7d2c; font-weight: bold; margin-top: 8px; white-space: pre-wrap; }
-    .err { color: #b30000; font-weight: bold; margin-top: 8px; white-space: pre-wrap; }
+    .ok { color: #0a7d2c; font-weight: bold; margin-top: 8px; }
+    .err { color: #b30000; font-weight: bold; margin-top: 8px; }
     .warn { background:#fff8e1; border:1px solid #ffe0a3; padding:12px; border-radius:12px; }
     .btnSecondary { background:#fff; color:#111; border:1px solid #111; }
     .btnSecondary:hover { background:#f4f4f4; }
@@ -26,18 +26,15 @@
     .statusBar { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; }
     .statusItem { padding:6px 10px; border-radius:999px; border:1px solid #ddd; background:#fafafa; }
     .logBox { font-family: monospace; white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:12px; font-size:12px; height:160px; overflow:auto; }
-    .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid #ddd; font-size: 12px; }
-    .pillOn { background: #e8fff0; border-color: #9be3b6; }
-    .pillOff { background: #fff0f0; border-color: #f0a8a8; }
-    .actions { display:flex; gap:10px; flex-wrap:wrap; }
-    .actions > * { flex: 1 1 220px; }
-    code { background:#f2f2f2; padding:2px 6px; border-radius:6px; }
+    .pillOk { background:#e9f7ee; border:1px solid #bfe7cd; padding:2px 8px; border-radius:999px; display:inline-block; font-size:12px; }
+    .pillErr { background:#fdeaea; border:1px solid #f5bcbc; padding:2px 8px; border-radius:999px; display:inline-block; font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 <body>
 
   <h1>Allcreaty 库存后台（MVP）</h1>
-  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings（Worker写入）/ Amazon SKU Map（enabled 控制批量同步）</p>
+  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings（由 Worker 同步写入）/ Amazon SKU 映射</p>
 
   <!-- 状态栏 -->
   <div class="box">
@@ -45,16 +42,17 @@
     <div class="statusBar">
       <div class="statusItem" id="statusAuth">Auth: 未登录</div>
       <div class="statusItem" id="statusDB">DB: 未检测</div>
-      <div class="statusItem" id="statusWorker">Worker: 未检测</div>
+      <div class="statusItem" id="statusAmazon">Amazon Worker: 未检测</div>
     </div>
+    <div class="small" id="statusTips"></div>
   </div>
 
   <div class="box warn">
-    <b>✅ 重要说明：</b>
+    <b>✅ MVP 说明：</b>
     <div class="small">
-      1) 本页面只使用 Supabase <b>anon key</b>（可公开），不要把 <b>service_role key</b> 放前端。<br/>
-      2) Amazon SP-API 的 refresh_token / client_secret 必须在 Worker 里（你已完成）。<br/>
-      3) 批量同步只会同步 <code>amazon_sku_map.enabled = true</code> 的 SKU。<br/>
+      1) 本页面使用 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
+      2) SP-API 的 client_secret / refresh_token / aws key 全部在 Cloudflare Worker Secrets 里。<br/>
+      3) Amazon 数据同步：前端只调用 Worker；Worker 写入 Supabase 的 <span class="mono">amazon_listings</span> 表。<br/>
     </div>
   </div>
 
@@ -81,26 +79,6 @@
           <button class="btnSecondary" onclick="logout()">退出登录</button>
         </div>
       </div>
-    </div>
-
-    <!-- Worker 同步 -->
-    <div class="box">
-      <h2>Amazon 同步 <span class="tag">Cloudflare Worker</span></h2>
-      <div class="small">
-        批量同步：Worker 读取 <code>amazon_sku_map</code> 里 <code>enabled=true</code> 的 SKU，逐个拉 SP-API，然后 upsert 到 <code>amazon_listings</code>。
-      </div>
-
-      <div class="actions">
-        <button onclick="syncAmazonBatch()">🔄 立即批量同步（POST /amazon/sync_batch）</button>
-        <button class="btnSecondary" onclick="pingWorker()">🔎 检测 Worker（GET /amazon/ping）</button>
-      </div>
-
-      <div class="row">
-        <input id="syncOneSku" placeholder="单个同步（SKU，如 FBM-Allcreaty-Elite）" />
-        <button class="btnSecondary" onclick="syncAmazonOne()">▶️ 同步这个 SKU（POST /amazon/sync_one?sku=...）</button>
-      </div>
-
-      <div id="syncMsg"></div>
     </div>
 
     <!-- 新增SKU -->
@@ -167,23 +145,43 @@
       <div id="txMsg"></div>
     </div>
 
-    <!-- Amazon Listings（新表：amazon_listings） -->
+    <!-- Amazon 同步控制 -->
     <div class="box">
-      <h2>Amazon Listings（Worker 缓存）</h2>
-      <div class="small">读取 <code>amazon_listings</code>（你 Worker 已经写入的表）</div>
+      <h2>Amazon 同步（Worker） <span class="tag">SP-API</span></h2>
+      <div class="small">
+        Worker Base：<span class="mono" id="workerBaseShow"></span><br/>
+        Marketplace 默认：US（ATVPDKIKX0DER）<br/>
+      </div>
+
+      <div class="row">
+        <button class="btnSecondary" onclick="amazonPing()">Amazon Ping</button>
+        <button onclick="amazonSyncBatch()">批量同步（enabled=true）</button>
+      </div>
+
+      <div class="row">
+        <input id="amazonSyncOneSku" placeholder="单个同步：输入 Amazon Seller SKU（例如 FBM-Allcreaty-Elite）" />
+        <button onclick="amazonSyncOne()">同步这个 SKU</button>
+      </div>
+
+      <div id="amazonSyncMsg"></div>
+    </div>
+
+    <!-- Amazon Listings -->
+    <div class="box">
+      <h2>Amazon Listings（Worker 写入）</h2>
+      <div class="small">
+        读取 Supabase 表：<span class="mono">amazon_listings</span>（由 Worker /amazon/sync_batch 写入）
+      </div>
       <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
 
       <table>
         <thead>
           <tr>
-            <th>Seller ID</th>
-            <th>Marketplace</th>
-            <th>SKU</th>
+            <th>Seller SKU</th>
             <th>ASIN</th>
-            <th>Title</th>
-            <th>Qty</th>
-            <th>Price</th>
-            <th>更新时间</th>
+            <th>Item Name</th>
+            <th>Amazon Last Updated</th>
+            <th>Synced At</th>
           </tr>
         </thead>
         <tbody id="amazonListingTbody"></tbody>
@@ -191,36 +189,35 @@
       <div id="amazonListingMsg"></div>
     </div>
 
-    <!-- Amazon SKU Mapping（加 enabled 开关） -->
+    <!-- Amazon SKU Mapping -->
     <div class="box">
-      <h2>Amazon SKU Map（批量同步开关）</h2>
+      <h2>Amazon SKU 映射</h2>
       <div class="small">
-        表：<code>amazon_sku_map</code>（你现在的列包含：id / amazon_seller_sku / sku_code / created_at / sku / enabled）
+        表：<span class="mono">amazon_sku_map</span><br/>
+        说明：Amazon Seller SKU（amazon_seller_sku）→ 你的仓库 SKU Code（sku_code）<br/>
+        批量同步只会读 <span class="mono">enabled=true</span> 的记录
       </div>
 
       <div class="row">
-        <input id="mapSku" placeholder="SKU（用于 Worker 拉 SP-API，比如 FBM-Allcreaty-Elite）" />
-        <input id="mapSkuCode" placeholder="仓库 sku_code（可选，用于内部映射）" />
+        <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 FBM-Allcreaty-Elite）" />
+        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 AC-001）" />
       </div>
+
       <div class="row">
-        <input id="mapAmazonSellerSku" placeholder="amazon_seller_sku（可选）" />
-        <select id="mapEnabled">
-          <option value="true">enabled = true（参与批量同步）</option>
-          <option value="false">enabled = false</option>
+        <select id="amazonEnabled">
+          <option value="true" selected>enabled = true（参与批量同步）</option>
+          <option value="false">enabled = false（不参与批量同步）</option>
         </select>
+        <button onclick="addAmazonSkuMap()">新增映射</button>
       </div>
-
-      <button onclick="upsertAmazonSkuMap()">新增/更新映射</button>
 
       <table>
         <thead>
           <tr>
             <th>enabled</th>
-            <th>sku</th>
-            <th>sku_code</th>
-            <th>amazon_seller_sku</th>
-            <th>created_at</th>
-            <th>操作</th>
+            <th>Amazon Seller SKU</th>
+            <th>SKU Code</th>
+            <th>创建时间</th>
           </tr>
         </thead>
         <tbody id="amazonMapTbody"></tbody>
@@ -240,13 +237,16 @@
 
   <script>
     /**********************
-     * ✅ 配置区（已替换好）
+     * ✅ 配置区（已替换）
      **********************/
     const CONFIG = {
       SUPABASE_URL: "https://zbfrdzaklmifuukokoii.supabase.co",
       SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpiZnJkemFrbG1pZnV1a29rb2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNjcxMDgsImV4cCI6MjA4MjY0MzEwOH0.XkZiFiKpmQ8FhwUR8SsIQFY4DlBCq4pRiUXaTikCSPk",
-      WORKER_BASE: "https://allcreaty-sp-api.allcreatyvision.workers.dev"
+      WORKER_BASE: "https://allcreaty-sp-api.allcreatyvision.workers.dev",
+      MARKETPLACE_ID: "ATVPDKIKX0DER" // US
     };
+
+    document.getElementById("workerBaseShow").textContent = CONFIG.WORKER_BASE;
 
     const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
 
@@ -260,12 +260,6 @@
       document.getElementById(id).textContent = text;
     }
 
-    function showMsg(el, msg, ok=true){
-      el.innerHTML = `<div class="${ok ? 'ok' : 'err'}">${msg}</div>`;
-      setTimeout(()=> el.innerHTML = "", 9000);
-      log((ok ? "OK: " : "ERR: ") + msg);
-    }
-
     init();
 
     async function init() {
@@ -273,7 +267,7 @@
       const { data: { session } } = await sb.auth.getSession();
       if (session) showApp(session.user);
       await testDB();
-      await pingWorker();
+      await amazonPing(true);
     }
 
     async function testDB(){
@@ -287,16 +281,10 @@
       }
     }
 
-    async function pingWorker(){
-      try{
-        const res = await fetch(CONFIG.WORKER_BASE + "/amazon/ping");
-        const text = await res.text();
-        setStatus("statusWorker", res.ok ? "Worker: ✅ 正常" : "Worker: ❌ 异常");
-        log("Worker ping: " + res.status + " " + text.slice(0, 120));
-      }catch(e){
-        setStatus("statusWorker", "Worker: ❌ 无法访问");
-        log("Worker ping ERROR: " + e.message);
-      }
+    function showMsg(el, msg, ok=true){
+      el.innerHTML = `<div class="${ok ? 'ok' : 'err'}">${msg}</div>`;
+      setTimeout(()=> el.innerHTML = "", 8000);
+      log((ok ? "OK: " : "ERR: ") + msg);
     }
 
     function showApp(user){
@@ -342,9 +330,6 @@
       location.reload();
     }
 
-    /**********************
-     * 库存相关（原逻辑保留）
-     **********************/
     async function createSku(){
       const sku_code = document.getElementById("sku_code").value.trim();
       const title = document.getElementById("title").value.trim();
@@ -462,74 +447,8 @@
     }
 
     /**********************
-     * ✅ Worker 同步（新增）
+     * ✅ Amazon Listings（新表 amazon_listings）
      **********************/
-    async function syncAmazonBatch(){
-      const msgEl = document.getElementById("syncMsg");
-      msgEl.innerHTML = `<div class="small">同步中…（调用 Worker 批量）</div>`;
-
-      try{
-        const res = await fetch(CONFIG.WORKER_BASE + "/amazon/sync_batch", { method: "POST" });
-        const text = await res.text();
-        let data; try{ data = JSON.parse(text); }catch{ data = text; }
-
-        if(!res.ok){
-          msgEl.innerHTML = `<div class="err">批量同步失败（HTTP ${res.status}）：\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}</div>`;
-          return;
-        }
-
-        msgEl.innerHTML = `<div class="ok">批量同步完成 ✅（HTTP ${res.status}）：\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}</div>`;
-        loadAmazonListings();
-        loadAmazonSkuMap();
-      }catch(e){
-        msgEl.innerHTML = `<div class="err">批量同步异常：${e.message}</div>`;
-      }
-    }
-
-    async function syncAmazonOne(){
-      const sku = document.getElementById("syncOneSku").value.trim();
-      const msgEl = document.getElementById("syncMsg");
-      if(!sku) return showMsg(msgEl, "请输入要同步的 SKU", false);
-
-      msgEl.innerHTML = `<div class="small">同步中…（${sku}）</div>`;
-
-      try{
-        const url = CONFIG.WORKER_BASE + "/amazon/sync_one?sku=" + encodeURIComponent(sku);
-        const res = await fetch(url, { method: "POST" });
-        const text = await res.text();
-        let data; try{ data = JSON.parse(text); }catch{ data = text; }
-
-        if(!res.ok){
-          msgEl.innerHTML = `<div class="err">单个同步失败（HTTP ${res.status}）：\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}</div>`;
-          return;
-        }
-
-        msgEl.innerHTML = `<div class="ok">单个同步完成 ✅（HTTP ${res.status}）：\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}</div>`;
-        loadAmazonListings();
-      }catch(e){
-        msgEl.innerHTML = `<div class="err">单个同步异常：${e.message}</div>`;
-      }
-    }
-
-    /**********************
-     * ✅ Amazon Listings（改为 amazon_listings）
-     **********************/
-    function extractQty(payload){
-      try{
-        const fa = payload?.fulfillmentAvailability;
-        if(Array.isArray(fa) && fa[0] && typeof fa[0].quantity === "number") return fa[0].quantity;
-      }catch(e){}
-      return "";
-    }
-
-    function extractPrice(payload){
-      try{
-        const offers = payload?.offers;
-        if(Array.isArray(offers) && offers[0]?.price?.amount) return offers[0].price.amount;
-      }catch(e){}
-      return "";
-    }
-
     async function loadAmazonListings(){
       const tbody = document.getElementById("amazonListingTbody");
       const msgEl = document.getElementById("amazonListingMsg");
@@ -537,108 +456,168 @@
 
       const { data, error } = await sb
         .from("amazon_listings")
-        .select("seller_id,marketplace_id,sku,asin,item_name,payload,created_at")
-        .order("created_at", { ascending: false })
-        .limit(50);
+        .select("sku,asin,item_name,amazon_last_updated_at,updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(100);
 
       if(error) return showMsg(msgEl, error.message, false);
 
       if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="8" class="small">暂无数据（先点“立即批量同步”）</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="small">暂无数据（先点“批量同步”或等 cron 自动同步）</td></tr>`;
         return;
       }
 
       data.forEach(r=>{
-        const qty = extractQty(r.payload);
-        const price = extractPrice(r.payload);
-
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${r.seller_id || ""}</td>
-          <td>${r.marketplace_id || ""}</td>
-          <td><b>${r.sku || ""}</b></td>
-          <td>${r.asin || ""}</td>
-          <td>${r.item_name || ""}</td>
-          <td>${qty}</td>
-          <td>${price}</td>
-          <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ""}</td>
+          <td class="mono">${r.sku || ""}</td>
+          <td class="mono">${r.asin || ""}</td>
+          <td>${escapeHtml(r.item_name || "")}</td>
+          <td>${r.amazon_last_updated_at ? new Date(r.amazon_last_updated_at).toLocaleString() : ""}</td>
+          <td>${r.updated_at ? new Date(r.updated_at).toLocaleString() : ""}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    /**********************
-     * ✅ Amazon SKU Map（显示 enabled + 支持 toggle）
-     **********************/
     async function loadAmazonSkuMap(){
       const tbody = document.getElementById("amazonMapTbody");
       const msgEl = document.getElementById("amazonMapMsg");
       tbody.innerHTML = "";
 
+      // 这里假设你表里有 enabled 字段（你已经在批量里用到了）
       const { data, error } = await sb
         .from("amazon_sku_map")
-        .select("id,sku,sku_code,amazon_seller_sku,enabled,created_at")
+        .select("enabled,amazon_seller_sku,sku_code,created_at")
         .order("created_at", { ascending: false })
         .limit(200);
 
       if(error) return showMsg(msgEl, error.message, false);
 
       if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（请先新增一条，enabled=true 才会参与批量同步）</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="small">暂无映射</td></tr>`;
         return;
       }
 
       data.forEach(r=>{
         const tr = document.createElement("tr");
-        const pillClass = r.enabled ? "pill pillOn" : "pill pillOff";
-        const pillText = r.enabled ? "true" : "false";
-
+        const enabledPill = (r.enabled === true)
+          ? `<span class="pillOk">true</span>`
+          : `<span class="pillErr">false</span>`;
         tr.innerHTML = `
-          <td><span class="${pillClass}">${pillText}</span></td>
-          <td><b>${r.sku || ""}</b></td>
-          <td>${r.sku_code || ""}</td>
-          <td>${r.amazon_seller_sku || ""}</td>
+          <td>${enabledPill}</td>
+          <td class="mono">${escapeHtml(r.amazon_seller_sku || "")}</td>
+          <td class="mono">${escapeHtml(r.sku_code || "")}</td>
           <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ""}</td>
-          <td>
-            <button class="btnSecondary" style="padding:8px 10px;border-radius:10px;"
-              onclick="toggleMapEnabled(${r.id}, ${r.enabled ? "false" : "true"})">
-              ${r.enabled ? "关闭" : "开启"}
-            </button>
-          </td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    async function toggleMapEnabled(id, enabled){
+    async function addAmazonSkuMap(){
+      const sellerSku = document.getElementById("amazonSellerSku").value.trim();
+      const skuCode = document.getElementById("amazonSkuCode").value.trim();
+      const enabledVal = document.getElementById("amazonEnabled").value === "true";
       const msgEl = document.getElementById("amazonMapMsg");
-      const { error } = await sb.from("amazon_sku_map").update({ enabled }).eq("id", id);
+
+      if(!sellerSku || !skuCode) return showMsg(msgEl, "Amazon Seller SKU 和 SKU Code 必填", false);
+
+      const { error } = await sb.from("amazon_sku_map")
+        .insert([{ amazon_seller_sku: sellerSku, sku_code: skuCode, enabled: enabledVal }]);
+
       if(error) return showMsg(msgEl, error.message, false);
-      showMsg(msgEl, `已更新：id=${id} enabled=${enabled} ✅`);
+
+      showMsg(msgEl, "新增映射成功 ✅");
+      document.getElementById("amazonSellerSku").value = "";
+      document.getElementById("amazonSkuCode").value = "";
       loadAmazonSkuMap();
     }
 
-    async function upsertAmazonSkuMap(){
-      const sku = document.getElementById("mapSku").value.trim();
-      const sku_code = document.getElementById("mapSkuCode").value.trim() || null;
-      const amazon_seller_sku = document.getElementById("mapAmazonSellerSku").value.trim() || null;
-      const enabled = document.getElementById("mapEnabled").value === "true";
-      const msgEl = document.getElementById("amazonMapMsg");
+    /**********************
+     * ✅ 调用 Worker：Ping / Sync One / Sync Batch
+     **********************/
+    async function amazonPing(silent=false){
+      const msgEl = document.getElementById("amazonSyncMsg");
+      try{
+        const r = await fetch(`${CONFIG.WORKER_BASE}/amazon/ping`);
+        const j = await r.json();
+        if(r.ok && j.ok){
+          setStatus("statusAmazon", "Amazon Worker: ✅ 正常");
+          document.getElementById("statusTips").textContent = `Worker OK: ${j.time}`;
+          if(!silent) showMsg(msgEl, "Amazon Worker Ping ✅ " + j.time, true);
+          log("Worker ping ok");
+        }else{
+          setStatus("statusAmazon", "Amazon Worker: ❌ 异常");
+          if(!silent) showMsg(msgEl, "Worker Ping 失败：" + JSON.stringify(j), false);
+          log("Worker ping failed");
+        }
+      }catch(e){
+        setStatus("statusAmazon", "Amazon Worker: ❌ 异常");
+        if(!silent) showMsg(msgEl, "Worker Ping 异常：" + e.message, false);
+        log("Worker ping error: " + e.message);
+      }
+    }
 
-      if(!sku) return showMsg(msgEl, "sku 必填（用于 Worker 拉 SP-API 的那个 SKU）", false);
+    async function amazonSyncBatch(){
+      const msgEl = document.getElementById("amazonSyncMsg");
+      showMsg(msgEl, "开始批量同步...（enabled=true）", true);
 
-      const { error } = await sb
-        .from("amazon_sku_map")
-        .upsert([{ sku, sku_code, amazon_seller_sku, enabled }], { onConflict: "sku" });
+      try{
+        const url = `${CONFIG.WORKER_BASE}/amazon/sync_batch?marketplaceId=${encodeURIComponent(CONFIG.MARKETPLACE_ID)}&limit=50`;
+        const r = await fetch(url, { method: "POST" });
+        const j = await r.json();
 
-      if(error) return showMsg(msgEl, error.message, false);
+        if(!r.ok || !j.ok){
+          showMsg(msgEl, "批量同步失败：" + JSON.stringify(j), false);
+          return;
+        }
 
-      showMsg(msgEl, "新增/更新成功 ✅（如果你没给 sku 建唯一约束，建议加一下）");
-      document.getElementById("mapSku").value = "";
-      document.getElementById("mapSkuCode").value = "";
-      document.getElementById("mapAmazonSellerSku").value = "";
-      document.getElementById("mapEnabled").value = "true";
-      loadAmazonSkuMap();
+        const okCount = (j.results || []).filter(x => x.ok).length;
+        const failCount = (j.results || []).length - okCount;
+
+        showMsg(msgEl, `批量同步完成 ✅ 成功 ${okCount} / 失败 ${failCount}`, true);
+        log("Batch result: " + JSON.stringify({ okCount, failCount }));
+        await loadAmazonListings();
+        await loadAmazonSkuMap();
+      }catch(e){
+        showMsg(msgEl, "批量同步异常：" + e.message, false);
+      }
+    }
+
+    async function amazonSyncOne(){
+      const sku = document.getElementById("amazonSyncOneSku").value.trim();
+      const msgEl = document.getElementById("amazonSyncMsg");
+      if(!sku) return showMsg(msgEl, "请输入 Amazon Seller SKU", false);
+
+      showMsg(msgEl, "开始同步 SKU: " + sku, true);
+
+      try{
+        const url = `${CONFIG.WORKER_BASE}/amazon/sync_one?marketplaceId=${encodeURIComponent(CONFIG.MARKETPLACE_ID)}&sku=${encodeURIComponent(sku)}`;
+        const r = await fetch(url, { method: "POST" });
+        const j = await r.json();
+
+        if(!r.ok || !j.ok){
+          showMsg(msgEl, "同步失败：" + JSON.stringify(j), false);
+          return;
+        }
+
+        showMsg(msgEl, `同步成功 ✅ ${sku}（ASIN: ${j.supabase_rows?.[0]?.asin || ""}）`, true);
+        await loadAmazonListings();
+      }catch(e){
+        showMsg(msgEl, "同步异常：" + e.message, false);
+      }
+    }
+
+    /**********************
+     * helpers
+     **********************/
+    function escapeHtml(str){
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
     }
   </script>
 </body>
