@@ -9,10 +9,12 @@
     h1 { margin-bottom: 4px; }
     .small { font-size: 12px; color: #666; margin-top:0; }
     .box { background:#fff; border: 1px solid #e5e5e5; padding: 16px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }
-    input, button, select { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid #ddd; }
+    input, button, select, textarea { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid #ddd; }
+    textarea { min-height: 84px; font-family: monospace; font-size: 12px; }
     button { cursor: pointer; border: none; background: #111; color: #fff; font-weight: bold; }
     button:hover { opacity: 0.9; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
     th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; vertical-align: top; }
     th { background: #fafafa; }
@@ -25,13 +27,17 @@
     .tag { display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #ddd; margin-left:8px; }
     .statusBar { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; }
     .statusItem { padding:6px 10px; border-radius:999px; border:1px solid #ddd; background:#fafafa; }
-    .logBox { font-family: monospace; white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:12px; font-size:12px; height:130px; overflow:auto; }
+    .logBox { font-family: monospace; white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:12px; font-size:12px; height:160px; overflow:auto; }
+    .pill { display:inline-flex; align-items:center; gap:8px; border:1px solid #ddd; border-radius:999px; padding:6px 10px; background:#fafafa; }
+    .mini { font-size: 12px; padding: 6px 10px; border-radius: 10px; }
+    .green { background:#0a7d2c; }
+    .red { background:#b30000; }
   </style>
 </head>
 <body>
 
   <h1>Allcreaty 库存后台（MVP）</h1>
-  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings缓存 / Amazon SKU映射</p>
+  <p class="small">支持：登录 / SKU新增 / 入库 / 库存查看 / 流水 / Amazon Listings缓存（新） / Amazon SKU映射与同步（新）</p>
 
   <!-- 状态栏 -->
   <div class="box">
@@ -39,16 +45,16 @@
     <div class="statusBar">
       <div class="statusItem" id="statusAuth">Auth: 未登录</div>
       <div class="statusItem" id="statusDB">DB: 未检测</div>
-      <div class="statusItem" id="statusAmazon">Amazon API: 未接入</div>
+      <div class="statusItem" id="statusWorker">Worker: 未检测</div>
     </div>
   </div>
 
   <div class="box warn">
-    <b>✅ 第一次使用必看：</b>
+    <b>✅ 必看：</b>
     <div class="small">
-      1) MVP 阶段建议在 Supabase 暂时关闭 RLS（skus / inventory / inventory_transactions / amazon表），否则会读写失败。<br/>
-      2) 本页面使用 Supabase anon public key（公开用的），不要把 service_role key 放到网页里。<br/>
-      3) SP-API 的 refresh_token / client_secret 不能放前端，必须放 Worker/Server。<br/>
+      1) 静态站只能使用 Supabase <b>anon key</b>；<b>service_role key</b> 只能放 Cloudflare Worker。<br/>
+      2) 如果你启用 RLS，需要为表配置 policy，否则前端读写会失败。MVP 阶段你也可以暂时关闭 RLS。<br/>
+      3) Amazon SP-API refresh_token / client_secret 永远不要放前端。<br/>
     </div>
   </div>
 
@@ -141,19 +147,84 @@
       <div id="txMsg"></div>
     </div>
 
-    <!-- Amazon Listings -->
+    <!-- Amazon Sync 控制台（新） -->
     <div class="box">
-      <h2>Amazon Listings（缓存）</h2>
-      <div class="small">显示 amazon_listings_cache 表数据（未来通过 Worker 自动拉取）</div>
+      <h2>Amazon 同步 <span class="tag">Worker</span></h2>
+      <div class="small">
+        前端只负责“触发同步”，真正的 SP-API 拉取 + Supabase upsert 在 Worker 内完成。
+      </div>
+
+      <div class="row">
+        <input id="syncOneSku" placeholder="输入 Seller SKU（例如 FBM-Allcreaty-Elite）" />
+        <button onclick="syncOne()">同步单个 SKU</button>
+      </div>
+
+      <div class="row">
+        <input id="syncAllLimit" type="number" placeholder="批量 limit（默认 50）" />
+        <button class="btnSecondary" onclick="syncAll()">批量同步（读 enabled=true 的 sku）</button>
+      </div>
+
+      <div class="small">返回结果：</div>
+      <textarea id="syncOut" readonly></textarea>
+
+      <div id="syncMsg"></div>
+    </div>
+
+    <!-- Amazon SKU Map（新结构） -->
+    <div class="box">
+      <h2>Amazon SKU 映射 & 同步开关 <span class="tag">amazon_sku_map</span></h2>
+      <div class="small">
+        这张表是“要不要同步”的来源：Worker 批量同步会读取 <b>enabled=true</b> 的 sku。<br/>
+        你现在表字段：sku / enabled / amazon_seller_sku / sku_code / created_at
+      </div>
+
+      <div class="row3">
+        <input id="mapSku" placeholder="sku（Seller SKU，例如 FBM-Allcreaty-Elite）" />
+        <input id="mapSkuCode" placeholder="sku_code（你仓库 SKU Code，可选）" />
+        <input id="mapAmazonSellerSku" placeholder="amazon_seller_sku（可选）" />
+      </div>
+
+      <div class="row">
+        <select id="mapEnabled">
+          <option value="true">enabled = true（参与批量同步）</option>
+          <option value="false">enabled = false（不参与同步）</option>
+        </select>
+        <button onclick="upsertAmazonSkuMap()">保存/更新（Upsert）</button>
+      </div>
+
+      <button class="btnSecondary" onclick="loadAmazonSkuMap()">刷新列表</button>
+
+      <table>
+        <thead>
+          <tr>
+            <th>sku</th>
+            <th>enabled</th>
+            <th>sku_code</th>
+            <th>amazon_seller_sku</th>
+            <th>created_at</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="amazonMapTbody"></tbody>
+      </table>
+      <div id="amazonMapMsg"></div>
+    </div>
+
+    <!-- Amazon Listings（新表 amazon_listings） -->
+    <div class="box">
+      <h2>Amazon Listings（缓存）<span class="tag">amazon_listings</span></h2>
+      <div class="small">
+        这里读取的是 Worker 写入的新表 <b>amazon_listings</b>（不是旧的 amazon_listings_cache）。
+      </div>
       <button class="btnSecondary" onclick="loadAmazonListings()">刷新 Amazon Listings</button>
 
       <table>
         <thead>
           <tr>
-            <th>Seller SKU</th>
+            <th>SKU</th>
             <th>ASIN</th>
             <th>Title</th>
-            <th>Qty</th>
+            <th>Price</th>
             <th>Status</th>
             <th>更新时间</th>
           </tr>
@@ -161,30 +232,6 @@
         <tbody id="amazonListingTbody"></tbody>
       </table>
       <div id="amazonListingMsg"></div>
-    </div>
-
-    <!-- Amazon SKU Mapping -->
-    <div class="box">
-      <h2>Amazon SKU 映射</h2>
-      <div class="small">amazon_sku_map：Amazon Seller SKU → 仓库 sku_code</div>
-
-      <div class="row">
-        <input id="amazonSellerSku" placeholder="Amazon Seller SKU（例如 AMZ-123）" />
-        <input id="amazonSkuCode" placeholder="你的仓库 SKU Code（例如 AC-001）" />
-      </div>
-      <button onclick="addAmazonSkuMap()">新增映射</button>
-
-      <table>
-        <thead>
-          <tr>
-            <th>Amazon Seller SKU</th>
-            <th>SKU Code</th>
-            <th>创建时间</th>
-          </tr>
-        </thead>
-        <tbody id="amazonMapTbody"></tbody>
-      </table>
-      <div id="amazonMapMsg"></div>
     </div>
 
     <!-- 日志 -->
@@ -199,11 +246,13 @@
 
   <script>
     /**********************
-     * ✅ 配置区
+     * ✅ 配置区（只改这里）
      **********************/
     const CONFIG = {
       SUPABASE_URL: "https://zbfrdzaklmifuukokoii.supabase.co",
-      SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpiZnJkemFrbG1pZnV1a29rb2lpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNjcxMDgsImV4cCI6MjA4MjY0MzEwOH0.XkZiFiKpmQ8FhwUR8SsIQFY4DlBCq4pRiUXaTikCSPk"
+      SUPABASE_ANON_KEY: "<<<PASTE_YOUR_ANON_KEY>>>",
+      // 你的 Worker 域名（注意：不要写 /amazon/...，只写 base）
+      WORKER_BASE: "https://allcreaty-sp-api.allcreatyvision.workers.dev"
     };
 
     const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
@@ -225,6 +274,7 @@
       const { data: { session } } = await sb.auth.getSession();
       if (session) showApp(session.user);
       await testDB();
+      await testWorker();
     }
 
     async function testDB(){
@@ -235,6 +285,23 @@
       }else{
         setStatus("statusDB", "DB: ✅ 正常");
         log("DB OK");
+      }
+    }
+
+    async function testWorker(){
+      try{
+        const r = await fetch(CONFIG.WORKER_BASE + "/amazon/ping");
+        const j = await r.json();
+        if(j.ok){
+          setStatus("statusWorker", "Worker: ✅ 正常");
+          log("Worker OK");
+        }else{
+          setStatus("statusWorker", "Worker: ⚠️ 异常");
+          log("Worker WARN: " + JSON.stringify(j));
+        }
+      }catch(e){
+        setStatus("statusWorker", "Worker: ❌ 连接失败");
+        log("Worker ERROR: " + e.message);
       }
     }
 
@@ -403,36 +470,94 @@
       });
     }
 
-    async function loadAmazonListings(){
-      const tbody = document.getElementById("amazonListingTbody");
-      const msgEl = document.getElementById("amazonListingMsg");
-      tbody.innerHTML = "";
+    /**********************
+     * Amazon：触发 Worker 同步
+     **********************/
+    async function syncOne(){
+      const sku = document.getElementById("syncOneSku").value.trim();
+      const out = document.getElementById("syncOut");
+      const msgEl = document.getElementById("syncMsg");
+      out.value = "";
 
-      const { data, error } = await sb
-        .from("amazon_listings_cache")
-        .select("amazon_seller_sku,asin,title,quantity,status,updated_at")
-        .order("updated_at", { ascending: false })
-        .limit(50);
+      if(!sku) return showMsg(msgEl, "请输入 sku", false);
+
+      try{
+        const r = await fetch(`${CONFIG.WORKER_BASE}/amazon/sync_one?sku=${encodeURIComponent(sku)}`, {
+          method: "POST"
+        });
+        const j = await r.json();
+        out.value = JSON.stringify(j, null, 2);
+        if(j.ok){
+          showMsg(msgEl, "同步成功 ✅");
+          loadAmazonListings();
+        }else{
+          showMsg(msgEl, "同步失败：" + (j.error || "unknown"), false);
+        }
+      }catch(e){
+        showMsg(msgEl, "请求失败：" + e.message, false);
+      }
+    }
+
+    async function syncAll(){
+      const limitRaw = document.getElementById("syncAllLimit").value.trim();
+      const limit = limitRaw ? Number(limitRaw) : 50;
+      const out = document.getElementById("syncOut");
+      const msgEl = document.getElementById("syncMsg");
+      out.value = "";
+
+      try{
+        const r = await fetch(`${CONFIG.WORKER_BASE}/amazon/sync_all?limit=${encodeURIComponent(limit)}`, {
+          method: "POST"
+        });
+        const j = await r.json();
+        out.value = JSON.stringify(j, null, 2);
+        if(j.ok){
+          showMsg(msgEl, `批量完成 ✅ count=${j.count ?? 0} okCount=${j.okCount ?? 0}`);
+          loadAmazonListings();
+        }else{
+          showMsg(msgEl, "批量失败：" + (j.error || j.step || "unknown"), false);
+        }
+      }catch(e){
+        showMsg(msgEl, "请求失败：" + e.message, false);
+      }
+    }
+
+    /**********************
+     * Amazon SKU Map（新结构）
+     **********************/
+    async function upsertAmazonSkuMap(){
+      const sku = document.getElementById("mapSku").value.trim();
+      const sku_code = document.getElementById("mapSkuCode").value.trim() || null;
+      const amazon_seller_sku = document.getElementById("mapAmazonSellerSku").value.trim() || null;
+      const enabled = document.getElementById("mapEnabled").value === "true";
+      const msgEl = document.getElementById("amazonMapMsg");
+
+      if(!sku) return showMsg(msgEl, "sku 必填（Seller SKU）", false);
+
+      // 用 upsert：按 sku 唯一
+      const { error } = await sb.from("amazon_sku_map").upsert([{
+        sku, enabled, sku_code, amazon_seller_sku
+      }], { onConflict: "sku" });
 
       if(error) return showMsg(msgEl, error.message, false);
 
-      if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（后面会接 SP-API 拉取）</td></tr>`;
-        return;
-      }
+      showMsg(msgEl, "保存成功 ✅");
+      document.getElementById("mapSku").value = "";
+      document.getElementById("mapSkuCode").value = "";
+      document.getElementById("mapAmazonSellerSku").value = "";
+      document.getElementById("mapEnabled").value = "true";
+      loadAmazonSkuMap();
+    }
 
-      data.forEach(r=>{
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${r.amazon_seller_sku}</td>
-          <td>${r.asin || ""}</td>
-          <td>${r.title || ""}</td>
-          <td>${r.quantity ?? ""}</td>
-          <td>${r.status || ""}</td>
-          <td>${r.updated_at ? new Date(r.updated_at).toLocaleString() : ""}</td>
-        `;
-        tbody.appendChild(tr);
-      });
+    async function toggleMapEnabled(sku, enabled){
+      const msgEl = document.getElementById("amazonMapMsg");
+      const { error } = await sb.from("amazon_sku_map")
+        .update({ enabled })
+        .eq("sku", sku);
+
+      if(error) return showMsg(msgEl, error.message, false);
+      showMsg(msgEl, `已更新：${sku} enabled=${enabled}`);
+      loadAmazonSkuMap();
     }
 
     async function loadAmazonSkuMap(){
@@ -442,44 +567,85 @@
 
       const { data, error } = await sb
         .from("amazon_sku_map")
-        .select("amazon_seller_sku,sku_code,created_at")
+        .select("sku,enabled,sku_code,amazon_seller_sku,created_at")
         .order("created_at", { ascending: false })
-        .limit(100);
+        .limit(200);
 
       if(error) return showMsg(msgEl, error.message, false);
 
       if(!data || data.length === 0){
-        tbody.innerHTML = `<tr><td colspan="3" class="small">暂无映射</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无记录（先新增一条 enabled=true 的 sku）</td></tr>`;
         return;
       }
 
       data.forEach(r=>{
         const tr = document.createElement("tr");
+        const enabledTxt = r.enabled ? "true" : "false";
+        const btn = r.enabled
+          ? `<button class="mini red" onclick="toggleMapEnabled('${escapeHtmlAttr(r.sku)}', false)">禁用</button>`
+          : `<button class="mini green" onclick="toggleMapEnabled('${escapeHtmlAttr(r.sku)}', true)">启用</button>`;
+
         tr.innerHTML = `
-          <td>${r.amazon_seller_sku}</td>
-          <td>${r.sku_code}</td>
+          <td>${escapeHtml(r.sku)}</td>
+          <td><span class="pill">${enabledTxt}</span></td>
+          <td>${escapeHtml(r.sku_code || "")}</td>
+          <td>${escapeHtml(r.amazon_seller_sku || "")}</td>
           <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ""}</td>
+          <td>${btn}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    async function addAmazonSkuMap(){
-      const sellerSku = document.getElementById("amazonSellerSku").value.trim();
-      const skuCode = document.getElementById("amazonSkuCode").value.trim();
-      const msgEl = document.getElementById("amazonMapMsg");
+    function escapeHtml(s){
+      return String(s ?? "")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+    function escapeHtmlAttr(s){ return escapeHtml(s).replaceAll(" ", "%20"); }
 
-      if(!sellerSku || !skuCode) return showMsg(msgEl, "Amazon Seller SKU 和 SKU Code 必填", false);
+    /**********************
+     * Amazon Listings（新表 amazon_listings）
+     **********************/
+    async function loadAmazonListings(){
+      const tbody = document.getElementById("amazonListingTbody");
+      const msgEl = document.getElementById("amazonListingMsg");
+      tbody.innerHTML = "";
 
-      const { error } = await sb.from("amazon_sku_map")
-        .insert([{ amazon_seller_sku: sellerSku, sku_code: skuCode }]);
+      // 这里读新表 amazon_listings
+      const { data, error } = await sb
+        .from("amazon_listings")
+        .select("sku,asin,item_name,payload,created_at")
+        .order("created_at", { ascending: false })
+        .limit(50);
 
       if(error) return showMsg(msgEl, error.message, false);
 
-      showMsg(msgEl, "新增映射成功 ✅");
-      document.getElementById("amazonSellerSku").value = "";
-      document.getElementById("amazonSkuCode").value = "";
-      loadAmazonSkuMap();
+      if(!data || data.length === 0){
+        tbody.innerHTML = `<tr><td colspan="6" class="small">暂无数据（先用 Worker sync_one 写入一条）</td></tr>`;
+        return;
+      }
+
+      data.forEach(r=>{
+        const summary = r.payload?.summaries?.[0];
+        const status = summary?.status ? summary.status.join(",") : "";
+        const offers = r.payload?.offers?.[0];
+        const price = offers?.price?.amount ? `${offers.price.amount} ${offers.price.currencyCode || offers.price.currency || ""}` : "";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escapeHtml(r.sku)}</td>
+          <td>${escapeHtml(r.asin || "")}</td>
+          <td>${escapeHtml(r.item_name || "")}</td>
+          <td>${escapeHtml(price)}</td>
+          <td>${escapeHtml(status)}</td>
+          <td>${r.created_at ? new Date(r.created_at).toLocaleString() : ""}</td>
+        `;
+        tbody.appendChild(tr);
+      });
     }
 
   </script>
